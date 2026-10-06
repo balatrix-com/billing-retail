@@ -1,0 +1,52 @@
+# Python byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+venwin/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Environment files
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+
+billing/.env
+billing/.env.*
+!billing/.env.example
+billing/bal_watch/*.env
+!billing/bal_watch/*.env.example
+
+bal_analysis/.env
+bal_analysis/.env.*
+!bal_analysis/.env.example
+
+# Logs and runtime files
+*.log
+logs/
+billing/logs/
+billing/src/logs/
+*.pid
+*.seed
+
+# Local cache
+billing/src/cache/*.json
+.pytest_cache/
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo

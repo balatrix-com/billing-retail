@@ -1,0 +1,342 @@
+================================================================================
+                    BAL_WATCH PROJECT - COMPLETE GUIDE
+================================================================================
+Target Location: billing-whitelable/bal_watch
+Author / System: Balatrix Billing Platform
+
+--------------------------------------------------------------------------------
+1. WHAT IS BAL_WATCH? (IN SIMPLE WORDS)
+--------------------------------------------------------------------------------
+Think of `bal_watch` as an automated financial security guard or watchdog for the 
+Balatrix billing system.
+
+In a telecom / billing platform, customers use services (like calls, SMS, data, 
+or API requests). As they use these services, money is deducted from their wallet.
+
+Some customers are allowed to have a "credit limit" (they can spend into the 
+negative up to a certain approved limit, like a credit card). 
+
+`bal_watch` continuously monitors all customer wallets in the background to ensure:
+  1. Customers do not exceed their agreed credit limits.
+  2. We know who is running out of money before their service stops.
+  3. Other systems (like call routing engines) instantly know who to block.
+
+
+--------------------------------------------------------------------------------
+2. THE THREE WALLET CATEGORIES (HOW IT CLASSIFIES CUSTOMERS)
+--------------------------------------------------------------------------------
+Every few seconds/minutes, `bal_watch` inspects every wallet and puts customers 
+into one of three buckets:
+
+A. LOW BALANCE (Warning Level)
+   - What it means: The customer still has positive money, but it is below a 
+     safe warning threshold (e.g., less than $100).
+   - Purpose: Good for sending friendly reminders: "Your balance is low, please recharge."
+   - Example: Threshold = 100. Customer balance = 45. -> Marked as "Low Balance".
+
+B. NEGATIVE BALANCE (Caution Level)
+   - What it means: The customer's balance is below 0, BUT it is still within 
+     their allowed credit limit.
+   - Purpose: They owe money, but they have not broken their contract yet.
+   - Example: Credit limit = 100. Balance = -40. -> Permitted, but marked as "Negative".
+
+C. OVERLIMIT (Critical Danger Level)
+   - What it means: The customer has spent MORE than their allowed credit limit!
+   - Math Formula: Balance < (-Credit Limit)
+   - Example: Credit limit = 50. Balance = -80.
+     They are overlimit by $30!
+   - Purpose: These customers should be blocked immediately so the company 
+     does not lose money.
+
+
+--------------------------------------------------------------------------------
+3. THE LINK WITH REDIS (WHY REDIS & HOW IT IS USED)
+--------------------------------------------------------------------------------
+Why use Redis instead of just querying PostgreSQL all the time?
+  - PostgreSQL stores permanent data, but checking PostgreSQL thousands of times 
+    per second during live phone calls or API requests would make the database slow.
+  - Redis is an ultra-fast, in-memory database. Checking if a customer is blocked 
+    in Redis takes less than 1 millisecond.
+
+`bal_watch` links with Redis in TWO distinct ways:
+
+================================================================================
+Way #1: The Live Blacklist Set (`blacklist:customers:overlimit`)
+================================================================================
+  - Redis Data Structure: SET
+  - Key Name: `blacklist:customers:overlimit`
+  - How it works:
+      1. When `bal_watch` runs a cycle, it finds all customer IDs that are OVERLIMIT.
+      2. It uses an atomic pipeline:
+           - DELETES the old set key
+           - ADDS all current overlimit customer IDs (`SADD`)
+      3. Why this is brilliant:
+           - The set is always 100% up to date.
+           - If a customer makes a payment and clears their debt, the very next 
+             scan automatically excludes them, lifting their block!
+      4. How other services use it:
+           - Before a call or transaction is approved, the switch/service simply asks 
+             Redis: `SISMEMBER blacklist:customers:overlimit <customer_id>`
+           - If 1 -> Block immediately.
+           - If 0 -> Allow service.
+
+================================================================================
+Way #2: The Event Audit Log / Queue (`billing:overlimit:log`)
+================================================================================
+  - Redis Data Structure: LIST
+  - Key Name: `billing:overlimit:log` (configured in setting.env)
+  - How it works:
+      1. For every overlimit wallet found, `bal_watch` builds a JSON payload:
+         {
+           "event_type": "wallet.overlimit",
+           "data": {
+             "customer_id": "cust_123",
+             "wallet_balance": -150.00,
+             "credit_limit": 100.00,
+             "overlimit_amount": 50.00,
+             "currency": "USD"
+           }
+         }
+      2. It pushes this JSON message onto the end of the Redis list (`RPUSH`).
+      3. Purpose:
+           - Works as an event queue or audit trail.
+           - Other background microservices (like an email/SMS notification 
+             sender or admin dashboard) can read (`LPOP` / `BLPOP`) from this 
+             list and take action.
+
+
+--------------------------------------------------------------------------------
+4. REAL-WORLD EXAMPLE: DOES IT SEND A SIGNAL TO BLOCK SERVICES IMMEDIATELY?
+--------------------------------------------------------------------------------
+Let us walk through the exact question:
+"If a person is at -$495 and their credit limit is $500. They make an hour-long 
+call, and after hanging up, the balance drops to -$505. What happens? Does it 
+send a signal to stop all services immediately?"
+
+Here is the exact step-by-step reality of how bal_watch and the system work:
+
+STEP 1: BEFORE AND DURING THE CALL
+-----------------------------------
+- Customer balance: -$495.00
+- Credit limit: $500.00 (Allowed to go down to -$500.00)
+- Current status: -$495 is still above -$500.
+  Therefore, this customer is NOT overlimit yet. They are categorized as 
+  "Negative Balance" (caution level), but NOT blacklisted.
+- The customer initiates the 1-hour call. 
+  The telecom switch checks the Redis set `blacklist:customers:overlimit`. 
+  The customer is NOT in the set, so the call connects without issues.
+- Note: `bal_watch` DOES NOT touch active ongoing calls in real-time. It is a 
+  periodic background scanner, not an in-call live media cutter.
+
+STEP 2: THE CALL HANGS UP
+-----------------------------------
+- The 1-hour call ends.
+- The telecom switch / billing engine calculates the call cost (say $10.00).
+- The billing CDR processor updates PostgreSQL:
+      UPDATE customer_wallets 
+      SET fiat_balance = -505.00 
+      WHERE customer_id = 'cust_123';
+- The database now reflects:
+      fiat_balance: -$505.00
+      credit_limit: $500.00
+
+STEP 3: HOW AND WHEN DOES BLOCKING HAPPEN?
+------------------------------------------
+Does `bal_watch` send an HTTP command directly to FreeSWITCH/Asterisk saying 
+"shut down customer XYZ"?
+-> NO, `bal_watch` does NOT make direct API calls to the telecom switches.
+Instead, it uses the "PASSIVE GATEKEEPER" architecture via Redis:
+
+1. Within the configured scan interval (e.g., within 100 seconds, or 
+   immediately if triggered on-demand via `POST /api/trigger_watch`):
+   - `bal_watch` queries PostgreSQL for all wallets.
+   - It sees: Customer 'cust_123' has Balance = -$505.00, Limit = $500.00.
+   - It computes: Balance (-505) < -Limit (-500) -> OVERLIMIT by $5.00!
+
+2. It updates the Redis Blacklist Set (`blacklist:customers:overlimit`):
+   - Adds 'cust_123' into `blacklist:customers:overlimit`.
+   - From THIS EXACT SECOND ONWARDS:
+     Whenever 'cust_123' attempts to place ANY new call, send an SMS, or 
+     make an API request, the telecom switch / API gateway checks Redis:
+         `SISMEMBER blacklist:customers:overlimit cust_123`
+     Redis immediately replies `1` (Blocked!).
+     The switch rejects the new call in less than 1 millisecond with a SIP 
+     cause code (e.g., 403 Forbidden / "Over credit limit").
+     --> All subsequent services are STOPPED IMMEDIATELY at the front gate!
+
+3. It publishes an Event to Redis List (`billing:overlimit:log`):
+   - Pushes the JSON payload:
+     {
+       "event_type": "wallet.overlimit",
+       "data": {
+         "customer_id": "cust_123",
+         "wallet_balance": -505.00,
+         "credit_limit": 500.00,
+         "overlimit_amount": 5.00,
+         "currency": "USD"
+       }
+     }
+   - Any external worker or notification bot (SMS, WhatsApp, Email, or webhook) 
+     listening to this Redis list picks up the event and sends an instant alert:
+     "Your account is overlimit by $5.00. Your services have been suspended."
+
+STEP 4: WHAT HAPPENS WHEN THEY PAY? (AUTOMATIC UNBLOCK)
+-------------------------------------------------------
+- Customer pays $100.00 online.
+- New balance in DB: -$405.00.
+- When `bal_watch` runs its next scan:
+  * Balance is -$405.00 (above -$500.00).
+  * Customer is no longer overlimit.
+  * `bal_watch` wipes and rebuilds `blacklist:customers:overlimit`.
+  * 'cust_123' is NOT in the list anymore.
+  * Next call attempt by the customer passes the Redis check and works instantly!
+  * Zero human intervention required.
+
+SUMMARY ANSWER:
+- Will it immediately terminate an already-connected active call?
+  No, `bal_watch` monitors balances and gatekeeps new calls via Redis.
+- Will it block all new services once the call finishes and balance is -$505?
+  YES! Within seconds, `bal_watch` puts their ID into the Redis blacklist set, 
+  and the switch will refuse all new calls/services from that moment forward.
+
+
+--------------------------------------------------------------------------------
+5. WHAT EACH FILE IN THE FOLDER DOES
+--------------------------------------------------------------------------------
+
+1. `setting.env`
+   - Holds the environment configuration for bal_watch:
+     * BAL_WATCH_INTERVAL_SEC: How often to scan (default: 100 seconds).
+     * BAL_WATCH_LOW_BALANCE_THRESHOLD: Warning threshold (default: 100).
+     * REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB, REDIS_KEY.
+
+2. `config.py`
+   - Python module that loads `setting.env` using `dotenv`.
+   - Also imports the main PostgreSQL database settings directly from `src.config`.
+   - Exposes `watch_config` with all settings neatly typed and ready to use.
+
+3. `db.py`
+   - Handles the connection to the PostgreSQL database.
+   - Contains `fetch_wallets()`, which runs the SQL query:
+       SELECT customer_id, currency, fiat_balance, credit_limit 
+       FROM customer_wallets;
+   - Returns all customer wallet records as Python dictionaries.
+
+4. `processor.py`
+   - The "brain" of the calculations.
+   - Receives the raw wallet rows from `db.py`.
+   - Iterates through each wallet using high-precision `Decimal` arithmetic.
+   - Evaluates:
+       * Is balance < -credit_limit?  --> Put into `overlimit_wallets`
+       * Else if balance < 0?          --> Put into `negative_wallets`
+       * Else if balance < threshold?  --> Put into `low_balance_wallets`
+   - Sorts the results (worst overlimit amounts first).
+   - Generates a clean summary with counts.
+
+5. `printer.py`
+   - The terminal / console UI formatter.
+   - Takes the structured results from `processor.py` and prints a handsome, 
+     easy-to-read ASCII table in your terminal showing:
+       * Timestamp and summary counts
+       * Detailed table of overlimit customers (Customer ID, Balance, Limit, Overlimit)
+       * Detailed table of negative balance customers
+       * Detailed table of low balance customers
+
+6. `publisher.py`
+   - Handles publishing events to Redis.
+   - Contains `publish_overlimit(wallet_data)`.
+   - Converts wallet numbers into JSON and executes `client.rpush(REDIS_KEY, message)`.
+
+7. `redis_manager.py`
+   - Centralized Redis connection manager (Singleton pattern: only connects once).
+   - `get_redis_client()`: Returns the live Redis connection.
+   - `sync_blacklist_set(overlimit_wallets)`: Executes the pipeline delete + SADD 
+     to keep `blacklist:customers:overlimit` perfectly in sync.
+   - `check_blacklist()`: A utility function. If you run `python -m bal_watch.redis_manager`, 
+     it fetches and displays all currently blacklisted customer IDs right in the terminal.
+
+8. `main.py`
+   - The master orchestrator loop.
+   - Runs an infinite loop (`while True`):
+       Step 1: Fetch wallets from DB (`fetch_wallets`)
+       Step 2: Classify wallets (`process_wallets`)
+       Step 3: Print tables to terminal (`print_results`)
+       Step 4: Push each overlimit wallet to Redis List (`publish_overlimit`)
+       Step 5: Refresh Redis Blacklist Set (`sync_blacklist_set`)
+       Step 6: Sleep for `INTERVAL_SEC` (e.g., 100 seconds) and repeat.
+
+9. `api_.example.txt`
+   - Documentation demonstrating how the watch cycle can also be triggered 
+     via an HTTP POST request (`POST /api/trigger_watch`) with a secret bearer 
+     token, in case an external system needs an immediate scan on-demand.
+
+
+--------------------------------------------------------------------------------
+6. STEP-BY-STEP CYCLE FLOWCHART
+--------------------------------------------------------------------------------
+
+  +----------------------------------------------------------------+
+  |              bal_watch Starts (main.py)                        |
+  +----------------------------------------------------------------+
+                                  |
+                                  v
+  +----------------------------------------------------------------+
+  | Step 1: Query PostgreSQL (db.py)                               |
+  |         SELECT * FROM customer_wallets                         |
+  +----------------------------------------------------------------+
+                                  |
+                                  v
+  +----------------------------------------------------------------+
+  | Step 2: Classify Wallets (processor.py)                        |
+  |         - Overlimit  (balance < -credit_limit)                 |
+  |         - Negative   (balance < 0)                             |
+  |         - Low        (balance < 100)                           |
+  +----------------------------------------------------------------+
+                                  |
+                                  v
+  +----------------------------------------------------------------+
+  | Step 3: Print Report to Screen (printer.py)                    |
+  |         Shows ASCII tables of affected customers               |
+  +----------------------------------------------------------------+
+                                  |
+            +---------------------+---------------------+
+            |                                           |
+            v                                           v
+  +-----------------------------------+   +------------------------------------+
+  | Step 4: Event Log (publisher.py)  |   | Step 5: Live Blacklist Sync        |
+  | Push JSON event to Redis List     |   |         (redis_manager.py)         |
+  | Key: `billing:overlimit:log`      |   | Rewrite Redis Set:                 |
+  | [RPUSH] for auditing / workers    |   | `blacklist:customers:overlimit`    |
+  +-----------------------------------+   +------------------------------------+
+                                  |
+                                  v
+  +----------------------------------------------------------------+
+  | Step 6: Sleep (e.g. 100 seconds)                               |
+  |         Then wake up and repeat loop!                          |
+  +----------------------------------------------------------------+
+
+
+--------------------------------------------------------------------------------
+7. HOW TO RUN AND USE IT
+--------------------------------------------------------------------------------
+
+A. To run the continuous watcher:
+   Open terminal inside `billing-whitelable`:
+   ```bash
+   python -m bal_watch.main
+   ```
+
+B. To quickly view currently blacklisted customers stored in Redis:
+   ```bash
+   python -m bal_watch.redis_manager
+   ```
+
+C. Configuration adjustments:
+   Open `bal_watch/setting.env` and change:
+   - `BAL_WATCH_INTERVAL_SEC` to increase or decrease scan frequency.
+   - `BAL_WATCH_LOW_BALANCE_THRESHOLD` to change low balance alert level.
+   - Redis host/port/credentials as needed.
+
+================================================================================
+                                END OF DOCUMENT
+================================================================================

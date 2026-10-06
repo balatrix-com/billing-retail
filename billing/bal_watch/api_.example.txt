@@ -1,0 +1,48 @@
+# API Endpoints for bal_watch
+
+## 1. Trigger Watch Cycle
+Manually triggers a single run of the wallet monitoring cycle for low balances, negative balances, and overlimit detections.
+
+**Endpoint:** `POST /api/trigger_watch`
+
+---
+
+### Request Option A (Authorization Header)
+```bash
+curl -X POST "http://localhost:8002/api/trigger_watch" \
+     -H "Authorization: Bearer default_secret_token"
+```
+
+### Request Option B (Query Parameter)
+```bash
+curl -X POST "http://10.30.0.8:8002/api/trigger_watch?token=default_secret_token"
+```
+
+---
+
+### Expected Output (Success)
+**HTTP Status:** 200 OK
+```json
+{
+  "status": "success",
+  "message": "Watch cycle completed successfully.",
+  "processed_wallets": 15,
+  "overlimit_count": 2
+}
+```
+
+### Expected Output (Error - Missing Token)
+**HTTP Status:** 401 Unauthorized
+```json
+{
+  "detail": "Token is missing"
+}
+```
+
+### Expected Output (Error - Invalid Token)
+**HTTP Status:** 401 Unauthorized
+```json
+{
+  "detail": "Invalid token"
+}
+```

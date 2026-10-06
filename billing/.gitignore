@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+venv/
+venwin/
+
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+setting.env
+*.env
+
+# Cache files
+src/cache/*.json
+
+# Logs & Archives
+logs/
+src/logs/
+*.log
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+src/cache/*.json

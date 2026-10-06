@@ -1,0 +1,99 @@
+================================================================================
+  BILLING SYSTEM - API ENDPOINT EXAMPLES
+================================================================================
+
+  These API endpoints are called by an external system (e.g., the admin panel
+  or CRM) whenever customer rate cards change or a new customer is created.
+
+  The billing processor NO LONGER auto-refreshes its cache from the database.
+  Instead, the external system must call these endpoints to push cache updates.
+
+  API Server: http://10.30.0.61:8005
+
+================================================================================
+
+
+--- 1. HEALTH CHECK -----------------------------------------------------------
+
+  Use this to verify the API server is running.
+
+  curl -X GET http://10.30.0.61:8005/health
+
+
+--- 2. REFRESH RATE CARD CACHE ------------------------------------------------
+
+  Call this whenever:
+    - A rate card is created / updated / deleted
+    - A customer's rate card assignment changes (customer_ratecard table)
+    - A new customer is created and assigned a rate card
+
+  curl -X POST http://10.30.0.61:8005/api/v1/cache/refresh
+
+  Example Response (200 OK):
+  {
+    "message": "Cache refresh completed successfully",
+    "details": {
+      "status": "success",
+      "rate_cards_count": 12,
+      "customer_mappings_count": 45,
+      "timestamp": "2026-06-22T16:00:00.000000+00:00"
+    }
+  }
+
+
+--- 3. REFRESH RECORDING RATE CARD CACHE --------------------------------------
+
+  Call this whenever:
+    - A recording rate card is created / updated / deleted
+    - A customer's recording rate card assignment changes (customer_rec_rc table)
+
+  curl -X POST http://10.30.0.61:5005/api/v1/cache/refresh-record
+
+  Example Response (200 OK):
+  {
+    "message": "Recording cache refresh completed successfully",
+    "details": {
+      "status": "success",
+      "rec_rate_cards_count": 5,
+      "customer_rec_rc_count": 30,
+      "timestamp": "2026-06-22T16:00:00.000000+00:00"
+    }
+  }
+
+
+--- 4. REFRESH BOTH CACHES (RECOMMENDED FOR NEW CUSTOMER) --------------------
+
+  When a new customer is created, call BOTH endpoints to ensure all caches
+  are up to date:
+
+  # Step 1: Refresh rate card + customer mapping cache
+  curl -X POST http://10.30.0.61:8001/api/v1/cache/refresh
+
+  # Step 2: Refresh recording rate card + customer recording mapping cache
+  curl -X POST http://10.30.0.61:8005/api/v1/cache/refresh-record
+
+
+--- ERROR RESPONSES -----------------------------------------------------------
+
+  500 Internal Server Error (refresh failed):
+  {
+    "detail": "Cache refresh failed: <error message>"
+  }
+
+
+--- INTEGRATION NOTES ---------------------------------------------------------
+
+  1. The API server runs on port 8005 (configured in api_server.py).
+
+  2. The billing processor loads cache from JSON files at:
+       src/cache/rate_cards.json
+       src/cache/customer_ratecard.json
+       src/cache/rec_rate_cards.json
+       src/cache/customer_rec_rc.json
+
+  3. Cache is loaded fresh on every billing batch, so changes take effect
+     on the next processing cycle after the API call completes.
+
+  4. Git repo: https://github.com/balatrix-com/billing/tree/billing-whitelable
+
+================================================================================
