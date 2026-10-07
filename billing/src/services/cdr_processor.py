@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from decimal import Decimal
 import psycopg
+import redis
 from psycopg.rows import dict_row
 
 from src.services.billing_service import BillingService
@@ -20,27 +21,47 @@ class CDRProcessor:
     Handles 11-step billing flow: fetch → lock → process → commit
     """
     
-    def __init__(self):
+    def __init__(self, redis_client=None):
         self.billing_service = BillingService()
         self.batch_size = config.BILLING_BATCH_SIZE
         self.cache_dir = Path(__file__).parent.parent / 'cache'
+        self.redis = redis_client or redis.Redis(
+            host=config.REDIS_HOST,
+            port=config.REDIS_PORT,
+            db=config.REDIS_DB,
+            password=config.REDIS_PASSWORD or None,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
         self._ensure_caches_exist()
+
+    def _sync_recording_gates(self, wallets: dict, customer_ids) -> None:
+        """Reflect committed wallet purchasing power into the recording gate."""
+        for customer_id in customer_ids:
+            wallet = wallets.get(customer_id)
+            if not wallet:
+                continue
+            fiat = Decimal(str(wallet.get('fiat_balance', 0) or 0))
+            credit_limit = Decimal(str(wallet.get('credit_limit', 0) or 0))
+            credit_used = Decimal(str(wallet.get('credit_used', 0) or 0))
+            available_power = fiat + max(Decimal('0'), credit_limit - credit_used)
+            try:
+                if available_power <= Decimal('0'):
+                    self.redis.sadd(config.RECORDING_OVERLIMIT_SET_KEY, customer_id)
+                    logger.warning(
+                        f"[RecordingGate] Customer {customer_id} reached $0 purchasing power. "
+                        "Added to recording overlimit block."
+                    )
+                else:
+                    self.redis.srem(config.RECORDING_OVERLIMIT_SET_KEY, customer_id)
+            except Exception as exc:
+                logger.error(f"[RecordingGate] Redis sync failed for {customer_id}: {exc}")
         
     def _ensure_caches_exist(self):
-        rc_cache = self.cache_dir / 'rate_cards.json'
-        cc_cache = self.cache_dir / 'customer_ratecard.json'
         rec_rc_cache = self.cache_dir / 'rec_rate_cards.json'
         rec_cc_cache = self.cache_dir / 'customer_rec_rc.json'
-        
-        if not rc_cache.exists() or not cc_cache.exists():
-            logger.info("Cache files missing. Auto-generating via refresh_cache.py...")
-            script_path = Path(__file__).parent.parent.parent / 'scripts' / 'refresh_cache.py'
-            try:
-                subprocess.run([sys.executable, str(script_path)], check=True)
-                logger.info("Caches auto-generated successfully.")
-            except Exception as e:
-                logger.error(f"Failed to auto-generate cache: {e}")
-                
+
         if not rec_rc_cache.exists() or not rec_cc_cache.exists():
             logger.info("Recording cache files missing. Auto-generating via refresh_record_cache.py...")
             rec_script_path = Path(__file__).parent.parent.parent / 'scripts' / 'refresh_record_cache.py'
@@ -221,17 +242,11 @@ class CDRProcessor:
             logger.info(f"Found {len(cdrs)} CDRs to process")
             
             # STEP 2: Load caches (only if CDRs exist)
-            rate_cards = self.load_rate_cards_cache()
-            customer_ratecards = self.load_customer_ratecard_cache()
+            rate_cards = {}
+            customer_ratecards = {}
             rec_rate_cards = self.load_rec_rate_cards_cache()
             customer_rec_rc = self.load_customer_rec_rc_cache()
             batch_timestamp = datetime.now(timezone.utc)
-            
-            if not rate_cards or not customer_ratecards:
-                logger.error("Rate cards or customer ratecards cache is empty")
-                cursor.close()
-                conn.close()
-                return 0
             
             # STEP 3: Extract unique customer IDs
             # Normalize CDR fields that may come back as bytes
@@ -252,7 +267,8 @@ class CDRProcessor:
                 placeholders = ','.join(['%s'] * len(valid_customer_ids))
                 wallet_query = f"""
                     SELECT 
-                        customer_id, currency, fiat_balance, free_seconds, version
+                        customer_id, currency, fiat_balance, free_seconds,
+                        credit_limit, credit_used, version
                     FROM customer_wallets
                     WHERE customer_id IN ({placeholders})
                     ORDER BY customer_id
@@ -270,6 +286,8 @@ class CDRProcessor:
                         'currency': currency,
                         'fiat_balance': Decimal(str(row['fiat_balance'])),
                         'free_seconds': row['free_seconds'],
+                        'credit_limit': Decimal(str(row['credit_limit'] or 0)),
+                        'credit_used': Decimal(str(row['credit_used'] or 0)),
                         'version': row['version']
                     }
                 logger.info(f"Locked {len(wallets)} wallets for customers: {list(wallets.keys())}")
@@ -449,7 +467,7 @@ class CDRProcessor:
                     wallets_to_update.extend([
                         customer_id,
                         wallet['fiat_balance'],
-                        wallet['free_seconds'],
+                        wallet['credit_used'],
                         batch_timestamp
                     ])
             
@@ -460,10 +478,10 @@ class CDRProcessor:
                     UPDATE customer_wallets AS cw
                     SET 
                         fiat_balance = v.fiat_balance::numeric,
-                        free_seconds = v.free_seconds::integer,
+                        credit_used = v.credit_used::numeric,
                         last_updated = v.last_updated::timestamptz,
                         version = cw.version + 1
-                    FROM (VALUES {wallet_placeholders}) AS v(customer_id, fiat_balance, free_seconds, last_updated)
+                    FROM (VALUES {wallet_placeholders}) AS v(customer_id, fiat_balance, credit_used, last_updated)
                     WHERE cw.customer_id = v.customer_id::varchar
                 """
                 cursor.execute(wallet_update_query, wallets_to_update)
@@ -475,6 +493,7 @@ class CDRProcessor:
             
             # STEP 10: Commit
             conn.commit()
+            self._sync_recording_gates(wallets, valid_customer_ids)
             logger.info(f"Successfully committed batch: {len(cdrs_to_update)} CDRs processed")
             
             return len(cdrs_to_update)

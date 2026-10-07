@@ -9,8 +9,11 @@ logger = setup_logger(__name__)
 
 class BillingService:
     """
-    Core billing calculation engine.
-    Handles rate lookup, increment calculation, free seconds deduction, and transaction prep.
+    Recording-only billing calculation engine.
+
+    Call duration is retained for reporting but is never charged. The legacy
+    call-rate arguments remain in the public method signature so rolling
+    deployments do not break callers while rate-card dependencies are removed.
     """
     
     def generate_idempotency_key(self, call_uuid: str) -> str:
@@ -120,91 +123,20 @@ class BillingService:
             (transaction_dict, cdr_update_dict) or (None, None) if error
         """
         try:
-            direction = str(cdr.get('direction', '')).strip().lower()
             cdr_currency = cdr.get('currency') or 'USD'
-
-            # INTERNAL calls are rated with zero charge (no wallet debit).
-            if direction == 'internal':
-                idempotency_key = self.generate_idempotency_key(cdr['call_uuid'])
-                transaction = {
-                    'customer_id': cdr['customer_id'],
-                    'source_type': 'cdr',
-                    'source_ref': str(cdr['cdr_id']),
-                    'idempotency_key': idempotency_key,
-                    'currency': cdr_currency,
-                    'free_used_sec': 0,
-                    'wallet_debit_amount': Decimal('0'),
-                    'amount_total': wallet['fiat_balance'] if wallet else Decimal('0'),
-                    'ratecard_id': None,
-                    'rate_per_min': Decimal('0'),
-                    'billing_increment_sec': 0,
-                    'status': 'posted',
-                    'notes': f"Internal call (no charge): {cdr['call_uuid']}",
-                    'created_at': batch_timestamp,
-                    'wallet_update_required': False,
-                    'recording_amount': Decimal('0'),
-                    'rec_ratecard_id': None
-                }
-                cdr_update = {
-                    'cdr_id': cdr['cdr_id'],
-                    'billsec': cdr.get('billsec', 0) or 0,
-                    'currency': cdr_currency,
-                    'ratecard_id': None,
-                    'billed_amount': Decimal('0'),
-                    'recording_amount': Decimal('0'),
-                    'total_amount': Decimal('0'),
-                    'recording_days': 0,
-                    'is_rated': True,
-                    'rated_at': batch_timestamp
-                }
-                return transaction, cdr_update
 
             if wallet is None:
                 logger.warning(f"Skipping CDR {cdr['cdr_id']}: no wallet found for {cdr['customer_id']}")
                 return None, None
 
-            # STEP 1: Get rate card
-            ratecard = self.get_rate_card(cdr['customer_id'], customer_ratecards, rate_cards)
-            if not ratecard:
-                logger.warning(f"Skipping CDR {cdr['cdr_id']}: no rate card found")
-                return None, None
-            
-            # STEP 2: Select rate based on direction
-            if direction == 'inbound':
-                rate_per_sec = Decimal(str(ratecard['in_rate_per_sec']))
-                rate_per_min = Decimal(str(ratecard['in_rate_per_min']))
-                initial_increment = ratecard['in_initial_increment_sec']
-                increment = ratecard['in_increment_sec']
-            elif direction == 'outbound':
-                rate_per_sec = Decimal(str(ratecard['ob_rate_per_sec']))
-                rate_per_min = Decimal(str(ratecard['ob_rate_per_min']))
-                initial_increment = ratecard['ob_initial_increment_sec']
-                increment = ratecard['ob_increment_sec']
-            else:
-                logger.error(f"Invalid direction {cdr['direction']} for CDR {cdr['cdr_id']}")
-                return None, None
-            
-            # STEP 3: Calculate billable seconds from source billsec (not duration_sec)
-            # For answered calls, billsec can be 0 due to SIP race conditions — fall back to duration_sec
+            # Preserve actual answered seconds for reporting. No call pulse,
+            # per-minute rate, or free-second consumption is applied.
             source_billsec = int(cdr.get('billsec', 0) or 0)
             if source_billsec == 0:
                 source_billsec = int(cdr.get('duration_sec', 0) or 0)
-            billable_sec = self.calculate_billable_seconds(
-                source_billsec,
-                initial_increment,
-                increment
-            )
-            
-            # STEP 4: Deduct free seconds first
-            free_used_sec = min(wallet['free_seconds'], billable_sec)
-            wallet['free_seconds'] -= free_used_sec
-            remaining_sec = billable_sec - free_used_sec
-            
-            # STEP 5: Calculate fiat charge
-            if remaining_sec > 0:
-                fiat_charge = Decimal(remaining_sec) * rate_per_sec
-            else:
-                fiat_charge = Decimal('0')
+            billable_sec = max(0, source_billsec)
+            free_used_sec = 0
+            fiat_charge = Decimal('0')
             
             # --- RECORDING BILLING LOGIC ---
             recording_amount = Decimal('0')
@@ -229,7 +161,7 @@ class BillingService:
                     rec_ratecard = rec_rate_cards.get(str(rec_ratecard_id))
                     
                     if rec_ratecard:
-                        duration_sec = int(cdr.get('duration_sec', 0) or 0)
+                        duration_sec = billable_sec
                         rec_increment = int(rec_ratecard.get('billing_increments') or 60)
                         
                         rec_billable_sec = self.calculate_billable_seconds(
@@ -251,8 +183,8 @@ class BillingService:
                 else:
                     logger.warning(f"[RecordingBilling] Customer {cust_id_str} not in customer_rec_rc cache")
             
-            # Total amount to deduct includes normal call charge + recording cost
-            total_amount = fiat_charge + recording_amount
+            # Recording is the only billable component.
+            total_amount = recording_amount
             
             # Multi-Tier Debit Logic for total_amount (fiat_balance -> credit_used)
             fiat = Decimal(str(wallet.get('fiat_balance', 0) or 0))
@@ -272,11 +204,8 @@ class BillingService:
             wallet['available_purchasing_power'] = available_power
             wallet['hard_stop_triggered'] = available_power <= Decimal('0')
             
-            # Show the full value of the call in the CDR
             billed_sec = billable_sec
-            
-            # The charged amount to the user (fiat_charge) - if covered by free seconds, this is 0
-            billed_amount = fiat_charge
+            billed_amount = Decimal('0')
 
             # Store wallet balance after this charge in amount_total for audit visibility
             wallet_balance_after = wallet['fiat_balance']
@@ -295,13 +224,13 @@ class BillingService:
                 'free_used_sec': free_used_sec,
                 'wallet_debit_amount': total_amount,
                 'amount_total': wallet_balance_after,
-                'ratecard_id': ratecard['ratecard_id'],
-                'rate_per_min': rate_per_min,
-                'billing_increment_sec': increment,
+                'ratecard_id': None,
+                'rate_per_min': Decimal('0'),
+                'billing_increment_sec': 0,
                 'status': 'posted',
-                'notes': f"Call billing: {cdr['call_uuid']}",
+                'notes': f"Recording billing: {cdr['call_uuid']}",
                 'created_at': batch_timestamp,
-                'wallet_update_required': True,
+                'wallet_update_required': total_amount > Decimal('0'),
                 'recording_amount': recording_amount,
                 'rec_ratecard_id': rec_ratecard_id
             }
@@ -311,7 +240,7 @@ class BillingService:
                 'cdr_id': cdr['cdr_id'],
                 'billsec': billed_sec,
                 'currency': currency,
-                'ratecard_id': ratecard['ratecard_id'],
+                'ratecard_id': None,
                 'billed_amount': billed_amount,
                 'recording_amount': recording_amount,
                 'total_amount': total_amount,
@@ -324,7 +253,7 @@ class BillingService:
             logger.debug(
                 f"CDR {cdr['cdr_id']} ({cdr.get('dest_type')}:{cdr.get('dest_value')} | Status: {cdr.get('status_code')}): "
                 f"{cdr['direction']} {cdr['duration_sec']}s → "
-                f"bill {billable_sec}s, free {free_used_sec}s, charge ${fiat_charge}"
+                f"call charge $0, recording charge ${recording_amount}"
             )
             
             return transaction, cdr_update

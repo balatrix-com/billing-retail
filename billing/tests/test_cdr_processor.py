@@ -7,7 +7,8 @@ from src.services.cdr_processor import CDRProcessor
 class TestCDRProcessorEdgeCases(unittest.TestCase):
     def setUp(self):
         with patch('src.services.cdr_processor.subprocess.run'):
-            self.processor = CDRProcessor()
+            self.redis = MagicMock()
+            self.processor = CDRProcessor(redis_client=self.redis)
 
     @patch('src.services.cdr_processor.psycopg.connect')
     def test_process_batch_with_unknown_customer(self, mock_connect):
@@ -100,6 +101,8 @@ class TestCDRProcessorEdgeCases(unittest.TestCase):
             'currency': 'USD',
             'fiat_balance': Decimal('100.00'),
             'free_seconds': 0,
+            'credit_limit': Decimal('0'),
+            'credit_used': Decimal('0'),
             'version': 1
         }]
 
@@ -133,6 +136,29 @@ class TestCDRProcessorEdgeCases(unittest.TestCase):
         processed = self.processor.process_batch()
         self.assertEqual(processed, 2)
         mock_conn.commit.assert_called_once()
+
+    def test_recording_gate_tracks_available_purchasing_power(self):
+        wallets = {
+            'blocked': {
+                'fiat_balance': Decimal('0'),
+                'credit_limit': Decimal('10'),
+                'credit_used': Decimal('10'),
+            },
+            'active': {
+                'fiat_balance': Decimal('1'),
+                'credit_limit': Decimal('0'),
+                'credit_used': Decimal('0'),
+            },
+        }
+
+        self.processor._sync_recording_gates(wallets, ['blocked', 'active'])
+
+        self.redis.sadd.assert_called_once_with(
+            'blacklist:customers:recording_overlimit', 'blocked'
+        )
+        self.redis.srem.assert_called_once_with(
+            'blacklist:customers:recording_overlimit', 'active'
+        )
 
 if __name__ == '__main__':
     unittest.main()
