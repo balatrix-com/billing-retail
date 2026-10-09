@@ -15,6 +15,10 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 # Support both psycopg (v3, used in billing venv) and psycopg2 (standard on Linux servers)
 try:
     import psycopg
@@ -36,7 +40,7 @@ DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "bala_billing")
 DB_USER = os.getenv("DB_USER", "bill_eng1")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Bill2k26x")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 RECORDINGS_DIR = Path(os.getenv("RECORDINGS_DIR", "/opt/recordings")).resolve()
 
 DB_PARAMS = {
