@@ -20,6 +20,8 @@ class Config:
     BILLING_BATCH_SIZE = int(os.getenv('BILLING_BATCH_SIZE', '100'))
     PROCESSING_INTERVAL_SEC = int(os.getenv('PROCESSING_INTERVAL_SEC', '60'))
     REFRESH_CACHE_TOKEN = os.getenv('REFRESH_CACHE_TOKEN', '')
+    BILLING_API_HOST = os.getenv('BILLING_API_HOST', '127.0.0.1')
+    BILLING_API_PORT = int(os.getenv('BILLING_API_PORT', '8005'))
 
     # Shared recording gate (same Redis DB used by t_2002.py)
     REDIS_HOST = os.getenv('LOOKUP_REDIS_HOST', os.getenv('REDIS_HOST', '127.0.0.1'))

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     LOOP_INTERVAL_SEC: int = 5
 
     # FastAPI Configuration
-    API_HOST: str = "0.0.0.0"
+    API_HOST: str = "127.0.0.1"
     API_PORT: int = 8001
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

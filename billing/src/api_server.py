@@ -1,5 +1,6 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
+from secrets import compare_digest
 import sys
 from pathlib import Path
 
@@ -23,8 +24,15 @@ app = FastAPI(
 async def health_check():
     return {"status": "healthy", "service": "billing-api"}
 
+def require_refresh_token(x_auth_token: str | None = Header(default=None)) -> None:
+    expected = config.REFRESH_CACHE_TOKEN
+    if not expected or len(expected.strip()) < 32:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Cache refresh unavailable")
+    if not x_auth_token or not compare_digest(x_auth_token, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
 @app.post("/api/v1/cache/refresh")
-async def trigger_cache_refresh():
+async def trigger_cache_refresh(_authorized: None = Depends(require_refresh_token)):
     logger.info("Cache refresh triggered via API")
     
     # Run the refresh logic
@@ -44,7 +52,7 @@ async def trigger_cache_refresh():
         )
 
 @app.post("/api/v1/cache/refresh-record")
-async def trigger_record_cache_refresh():
+async def trigger_record_cache_refresh(_authorized: None = Depends(require_refresh_token)):
     logger.info("Recording cache refresh triggered via API")
     
     stats = run_refresh_record()
@@ -64,7 +72,7 @@ async def trigger_record_cache_refresh():
 
 def main():
     logger.info("Starting Billing API Server...")
-    uvicorn.run(app, host="0.0.0.0", port=8005)
+    uvicorn.run(app, host=config.BILLING_API_HOST, port=config.BILLING_API_PORT)
 
 if __name__ == "__main__":
     main()

@@ -28,6 +28,10 @@ pm2 save
 ## API Usage
 
 The billing system provides cache refresh API endpoints to update in-memory configurations without restarting.
+Both POST routes require `X-Auth-Token` matching `REFRESH_CACHE_TOKEN` (a unique
+random value of at least 32 characters). The API binds to `127.0.0.1:8005` by
+default; see [Phase 4.1 deployment settings](../../security_phase4_1_deployment.md)
+for private-interface deployments and caller configuration.
 
 ### Start API Server
 ```bash
@@ -36,10 +40,10 @@ python src/api_server.py
 
 ### Trigger Rate Card Cache Refresh
 ```bash
-curl -X POST http://10.30.0.8:8000/api/v1/cache/refresh -H "X-Auth-Token: <dev-token-123>"
+curl -X POST http://127.0.0.1:8005/api/v1/cache/refresh -H "X-Auth-Token: <configured-token>"
 ```
 
 ### Trigger Recording Rate Card Cache Refresh
 ```bash
-curl -X POST http://10.30.0.8:8000/api/v1/cache/refresh-record -H "X-Auth-Token: <dev-token-123>"
+curl -X POST http://127.0.0.1:8005/api/v1/cache/refresh-record -H "X-Auth-Token: <configured-token>"
 ```

@@ -2,6 +2,10 @@
 
 This master guide provides a 360-degree view of the high-speed CDR Analytics Backend. It is designed for both developers and management to understand how we transform raw billing data into real-time business intelligence.
 
+Security deployment note: the API now binds to `127.0.0.1` by default. If the PBX
+backend runs on another host, set `API_HOST` to a private interface address and
+align `ANALYTICS_ENGINE_URL`; see [Phase 4.1 deployment settings](../../security_phase4_1_deployment.md).
+
 ---
 
 ## 📊 System Architecture & Data Flow
@@ -103,7 +107,7 @@ The error **`ConnectionRefusedError`** means Redis is not started. You must have
     If it says **`PONG`**, you are successful!
 
 ### C. FastAPI Details
-- **API_HOST**: Set to `0.0.0.0` to allow access from other computers on your network.
+- **API_HOST**: Defaults to `127.0.0.1`. Use a private interface address for an authorized remote PBX backend.
 - **API_PORT**: Default is **`8001`**. 
 - **The URL**: Once running, your API is at `http://your-server-ip:8001`. You can see the documentation at `/docs`.
 
@@ -131,7 +135,7 @@ python -m backfill
 ### Step 3: Real-Time & API
 Keep these two running in separate MobaXterm tabs:
 - **Tab 1 (The Processor):** `python -m main` (Updates stats every 5 seconds)
-- **Tab 2 (The API):** `uvicorn api:app --host 0.0.0.0 --port 8001` (Serves the dashboard)
+- **Tab 2 (The API):** `uvicorn api:app --host 127.0.0.1 --port 8001` (Serves the dashboard locally)
 
 ---
 
@@ -171,7 +175,7 @@ git push -u origin main
 5.  **Start Real-Time Sync** (In Tab #2, after backfill finishes):
     `python -m main`
 6.  **Start the API** (In Tab #3):
-    `uvicorn api:app --host 0.0.0.0 --port 8001`
+    `uvicorn api:app --host 127.0.0.1 --port 8001`
 
 6. Running on Local Windows (PowerShell / CMD)
 
@@ -209,7 +213,7 @@ Open **three separate** PowerShell windows:
 -   **Window 3 (The API):**
     Keep this running to feed the dashboard:
     ```powershell
-    uvicorn api:app --host 0.0.0.0 --port 8001
+    uvicorn api:app --host 127.0.0.1 --port 8001
     ```
 
 ## 7. How to Verify Everything is Working
@@ -227,7 +231,7 @@ If you have all three terminals running, here is exactly what you should see to 
 - **Meaning**: The system is actually reading your PostgreSQL data and calculating your total calls, minutes, and costs right now.
 
 ### ✅ Terminal 3: The API (The Voice)
-- **What to look for**: You should see: `Uvicorn running on http://0.0.0.0:8001`.
+- **What to look for**: With the default bind, you should see `Uvicorn running on http://127.0.0.1:8001`.
 - **Meaning**: The system is ready to "talk" to your dashboard.
 
 ---
