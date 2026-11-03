@@ -46,7 +46,7 @@ def get_date_range(range_param: str):
 
 @app.get("/analytics/dashboard")
 async def get_dashboard(
-    customer_id: str = Query(..., description="Customer ID"),
+    customer_id: str | None = Query(None, description="Customer ID (optional; omit for global analytics)"),
     range: str = Query('today', description="Date range: today, yesterday, last_7_days, last_30_days")
 ):
     start_date, end_date = get_date_range(range)
@@ -61,7 +61,7 @@ async def get_dashboard(
                  THEN ROUND(SUM(total_duration_sec)::numeric / SUM(answered_calls)::numeric, 2)
                  ELSE 0 END AS avg_duration_sec
         FROM cdr_metrics_day
-        WHERE customer_id = %(customer_id)s 
+        WHERE (%(customer_id)s IS NULL OR %(customer_id)s = '' OR %(customer_id)s = 'all' OR customer_id = %(customer_id)s) 
           AND bucket_day >= %(start_date)s 
           AND bucket_day <= %(end_date)s
     ),
@@ -75,7 +75,7 @@ async def get_dashboard(
                 )
             ) AS items
         FROM cdr_metrics_day
-        WHERE customer_id = %(customer_id)s 
+        WHERE (%(customer_id)s IS NULL OR %(customer_id)s = '' OR %(customer_id)s = 'all' OR customer_id = %(customer_id)s) 
           AND bucket_day >= %(start_date)s 
           AND bucket_day <= %(end_date)s
     ),
@@ -90,7 +90,7 @@ async def get_dashboard(
         FROM (
             SELECT did_value, SUM(inbound_calls) as sum_inbound
             FROM cdr_metrics_did_day
-            WHERE customer_id = %(customer_id)s 
+            WHERE (%(customer_id)s IS NULL OR %(customer_id)s = '' OR %(customer_id)s = 'all' OR customer_id = %(customer_id)s) 
               AND bucket_day >= %(start_date)s 
               AND bucket_day <= %(end_date)s
             GROUP BY did_value
@@ -113,7 +113,7 @@ async def get_dashboard(
                 direction,
                 SUM(total_calls) as total_calls
             FROM cdr_metrics_hourly
-            WHERE customer_id = %(customer_id)s
+            WHERE (%(customer_id)s IS NULL OR %(customer_id)s = '' OR %(customer_id)s = 'all' OR customer_id = %(customer_id)s)
               AND bucket_hour >= %(start_date)s::date 
               AND bucket_hour < (%(end_date)s::date + INTERVAL '1 day')
             GROUP BY hour_num, direction
