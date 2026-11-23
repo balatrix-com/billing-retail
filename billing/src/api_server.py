@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import config
 from src.utils.logger import setup_logger
-from scripts.refresh_cache import run_refresh
 from scripts.refresh_record_cache import run_refresh_record
 
 logger = setup_logger(__name__)
@@ -32,25 +31,8 @@ def require_refresh_token(x_auth_token: str | None = Header(default=None)) -> No
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 @app.post("/api/v1/cache/refresh")
-async def trigger_cache_refresh(_authorized: None = Depends(require_refresh_token)):
-    logger.info("Cache refresh triggered via API")
-    
-    # Run the refresh logic
-    stats = run_refresh()
-    
-    if stats["status"] == "success":
-        logger.info(f"API Cache refresh successful: {stats}")
-        return {
-            "message": "Cache refresh completed successfully",
-            "details": stats
-        }
-    else:
-        logger.error(f"API Cache refresh failed: {stats['message']}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Cache refresh failed: {stats['message']}"
-        )
-
+# Compatibility URL: retail standard rate cards were retired. Both URLs refresh
+# the active rec_rate_card / customer_rec_rc caches and retain token protection.
 @app.post("/api/v1/cache/refresh-record")
 async def trigger_record_cache_refresh(_authorized: None = Depends(require_refresh_token)):
     logger.info("Recording cache refresh triggered via API")
